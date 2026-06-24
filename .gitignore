@@ -1,0 +1,95 @@
+# ==========================================
+# GITIGNORE PADRÃO - PROJETO QUANT/DATA SCIENCE
+# ==========================================
+
+# --- Ambientes Virtuais Locais ---
+.conda/
+.venv/
+venv/
+env/
+ENV/
+bin/
+lib/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Cache do Python e Compilação ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Ferramentas de Data Science e Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+.trash/
+.jupyter/
+# Se quiser versionar os notebooks mas não os outputs pesados, descomente a linha abaixo:
+# *.ipynb
+
+# --- Arquivos de Dados (Prevenção de estouro de quota/vazamento) ---
+data/raw/
+data/processed/
+data/external/
+*.csv
+*.xlsx
+*.parquet
+*.pickle
+*.pkl
+*.h5
+*.jsonl
+*.db
+*.sqlite
+*.sqlite3
+
+# --- IDEs e Editores de Código ---
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~
+
+# --- Logs e Diagnósticos ---
+*.log
+logs/
+.plots/
+*.plt
+
+# --- Configurações de Ambiente (Segurança de Chaves e Credenciais) ---
+.env
+.env.local
+.env.*
+.secrets
+credentials.json
+
+# --- Docker & Containerização ---
+.docker/
+*.tar
+
+# --- Sistema Operacional ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
