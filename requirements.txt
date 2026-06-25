@@ -1,0 +1,24 @@
+# ==============================================================================
+# Caprisk Engine - Dependências do Projeto
+# ==============================================================================
+
+# 1. Core Data Science & Computação Científica
+numpy>=1.24.0,<2.0.0      # Processamento numérico de alta performance (vetorização)
+pandas>=2.0.0,<3.0.0     # Manipulação de dataframes e séries temporais estruturadas
+scipy>=1.10.0,<2.0.0      # Otimização numérica (scipy.optimize para estrutura ótima)
+
+# 2. Modelagem Econométrica e Séries Temporais
+statsmodels>=0.14.0       # Modelos VAR/VECM e extração de intervalos de confiança
+
+# 3. Engenharia de Dados & Web Scraping
+requests>=2.31.0          # Requisições HTTP para APIs (BCB/SGS) e portais econômicos
+beautifulsoup4>=4.12.0    # Parseamento de HTML para scraping de índices customizados
+lxml>=4.9.0               # Engine de alta performance para leitura de tabelas HTML
+html5lib>=1.1             # Fallback estável para o BeautifulSoup
+
+# 4. Validação de Dados & Governança de Tipos
+pydantic>=2.5.0,<3.0.0    # Validação estrita dos inputs operacionais e de passivos
+
+# 5. Infraestrutura de API e Servidor (Fase de Entrega)
+fastapi>=0.100.0          # Framework assíncrono para disponibilização dos endpoints
+uvicorn>=0.22.0           # Servidor ASGI de alta performance para rodar a API
