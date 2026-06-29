@@ -1,108 +1,143 @@
 import numpy as np
+import pandas as pd
 from pydantic import BaseModel, Field
-from typing import Literal, List
-
-# --- SCHEMAS DE VALIDAÇÃO (Pydantic) ---
-
-class DebtContractInput(BaseModel):
-    id: str
-    principal: float = Field(..., gt=0, description="Valor total captado da dívida")
-    indexador: Literal["CDI", "IPCA", "PRE"]
-    spread_anual: float = Field(..., ge=0, description="Spread ou taxa fixa anual (ex: 0.025 para 2.5%)")
-    amortizacao: Literal["SAC", "PRICE", "BULLET"]
-    prazo_meses: int = Field(..., gt=0, le=120, description="Prazo total do contrato em meses")
-    carencia_meses: int = Field(0, ge=0, description="Meses de carência para o início da amortização do principal")
+from enum import Enum
+from typing import List, Optional
 
 
-class CapitalStructureInput(BaseModel):
-    equity: float = Field(..., ge=0, description="Montante de Capital Próprio investido")
-    ke_anual: float = Field(..., gt=0, description="Custo de oportunidade do Capital Próprio (Taxa requerida)")
-    dividas: List[DebtContractInput]
+class TipoAmortizacao(str, Enum):
+    PRICE = "PRICE"
+    SAC = "SAC"
+    BULLET = "BULLET"
 
-# --- MOTOR DE CÁLCULO FINANCEIRO ---
 
-class DebtPortfolioEvaluator:
-    def __init__(self, portfolio: CapitalStructureInput):
-        self.portfolio = portfolio
+class TipoIndexador(str, Enum):
+    PREFIXADO = "PREFIXADO"
+    SELIC = "SELIC"
+    IPCA = "IPCA"
+    IGPM = "IGPM"
+    DOLAR = "DOLAR"
 
-    def project_contract_cash_flow(self, contract: DebtContractInput, macro_scenarios: dict) -> np.ndarray:
+
+class ContratoDividaInput(BaseModel):
+    """
+    Schema estrito para validação de cada contrato de passivo enviado pelo cliente.
+    """
+    id_divida: str = Field(..., description="Identificador único do contrato ou banco emissor.")
+    valor_principal: float = Field(..., ge=0, description="Valor nominal captado (Saldo devedor inicial).")
+    taxa_nominal_ano: float = Field(..., ge=0, description="Spread ou taxa fixa contratual ao ano (ex: 0.05 para 5% a.a.).")
+    tipo_amortizacao: TipoAmortizacao = Field(..., description="Sistema de amortização: PRICE, SAC ou BULLET.")
+    indexador: TipoIndexador = Field(..., description="Indexador macroeconômico ao qual a dívida está atrelada.")
+    prazo_total_meses: int = Field(..., ge=1, description="Prazo total do contrato em meses.")
+    carencia_meses: int = Field(default=0, ge=0, description="Meses de carência onde há apenas pagamento de juros ou acúmulo.")
+
+
+class PassivoCalculatorEngine:
+    """
+    Motor financeiro responsável por projetar e estressar cronogramas de pagamento.
+    Calcula parcelas sob tabelas PRICE, SAC e BULLET integrando indexadores estocásticos.
+    """
+    def __init__(self, contrato: ContratoDividaInput):
+        self.contrato = contrato
+        # Converte a taxa anual nominal do contrato para a taxa equivalente mensal (juros compostos)
+        self.taxa_mensal_contratual = (1 + contrato.taxa_nominal_ano) ** (1 / 12) - 1
+
+    def calcular_cronograma_estressado(self, serie_indexador_projetada: pd.Series) -> pd.DataFrame:
         """
-        Projeta o Serviço da Dívida (Juros + Amortização) de um contrato específico
-        para TODOS os cenários simulados de Monte Carlo simultaneamente.
-        
-        Output: np.ndarray de shape (n_simulations, n_months + 1)
+        Gera o fluxo de caixa completo da dívida (Parcela, Juros, Amortização, Saldo Devedor)
+        recalculado dinamicamente com base nas projeções mensais do indexador econômico.
         """
-        n_simulations, n_months = macro_scenarios["selic"].shape
-        n_months -= 1  # Ajuste para desconsiderar o mês 0
+        prazo = self.contrato.prazo_total_meses
+        carencia = self.contrato.carencia_meses
+        saldo_devedor = self.contrato.valor_principal
         
-        # Matriz para guardar as saídas de caixa do serviço da dívida (Mês 0 é zero)
-        debt_service = np.zeros((n_simulations, n_months + 1))
+        # Garante que a série do indexador cobre todo o horizonte do contrato
+        if len(serie_indexador_projetada) < prazo:
+            raise ValueError(f"A série do indexador projetada possui tamanho ({len(serie_indexador_projetada)}) menor que o prazo da dívida ({prazo}).")
+            
+        # Listas para acumular o fluxo de caixa
+        fluxo_datas = []
+        fluxo_parcelas = []
+        fluxo_juros = []
+        fluxo_amortizacoes = []
+        fluxo_saldo_devedor = []
         
-        # Inicializa matrizes auxiliares para controlar o Saldo Devedor de cada cenário
-        saldo_devedor = np.zeros((n_simulations, n_months + 1))
-        saldo_devedor[:, 0] = contract.principal
-        
-        # Converte o spread anual para mensal (taxa equivalente)
-        rate_spread_mensal = (1 + contract.spread_anual) ** (1/12) - 1
-        
-        for t in range(1, n_months + 1):
-            if t > contract.prazo_meses:
-                break
-                
-            # 1. Determinar a taxa de juros do mês corrente para cada cenário
-            if contract.indexador == "CDI":
-                # Selic/CDI simulada para o mês convertido em taxa mensal equivalente
-                rate_macro_mensal = (1 + macro_scenarios["selic"][:, t-1]) ** (1/12) - 1
-                rate_total_mensal = rate_macro_mensal + rate_spread_mensal
-            elif contract.indexador == "IPCA":
-                # IPCA simulado para o mês convertido em taxa mensal equivalente
-                rate_macro_mensal = (1 + macro_scenarios["ipca"][:, t-1]) ** (1/12) - 1
-                rate_total_mensal = rate_macro_mensal + rate_spread_mensal
-            else:  # PRE
-                rate_total_mensal = rate_spread_mensal
-                
-            # 2. Atualiza o Saldo Devedor com a correção monetária/juros antes do pagamento
-            juros_do_mes = saldo_devedor[:, t-1] * rate_total_mensal
+        for mes in range(1, prazo + 1):
+            # 1. Captura a taxa do indexador para o mês corrente (ex: IPCA do mês ou Selic do mês)
+            # Se for Prefixado, o indexador não adiciona custo (taxa_indexador = 0)
+            taxa_indexador_mes = 0.0
+            if self.contrato.indexador != TipoIndexador.PREFIXADO:
+                taxa_indexador_mes = serie_indexador_projetada.iloc[mes - 1]
             
-            # 3. Cálculo da Amortização do Principal dependendo do sistema e da carência
-            meses_decorridos = t
-            meses_restantes_amortizacao = contract.prazo_meses - contract.carencia_meses
+            # Taxa total ponderada do mês = Juros Contratual + Variação do Indexador (Aproximação linear padrão de mercado)
+            taxa_total_mes = self.taxa_mensal_contratual + taxa_indexador_mes
             
-            amortizacao_do_mes = np.zeros(n_simulations)
-            
-            if meses_decorridos > contract.carencia_meses:
-                if contract.amortizacao == "SAC":
-                    # Amortização constante sobre o principal original
-                    amortizacao_do_mes[:] = contract.principal / meses_restantes_amortizacao
-                elif contract.amortizacao == "BULLET" and meses_decorridos == contract.prazo_meses:
-                    # Todo o principal pago no último mês
-                    amortizacao_do_mes[:] = contract.principal
-                elif contract.amortizacao == "PRICE":
-                    # Fórmula da tabela PRICE estocástica adaptada para o saldo remanescente
-                    n_p = contract.prazo_meses - meses_decorridos + 1
-                    # Evita divisão por zero caso a taxa zere
-                    pmt = np.where(
-                        rate_total_mensal > 0,
-                        saldo_devedor[:, t-1] * (rate_total_mensal * (1 + rate_total_mensal)**n_p) / ((1 + rate_total_mensal)**n_p - 1),
-                        saldo_devedor[:, t-1] / n_p
-                    )
-                    amortizacao_do_mes = pmt - juros_do_mes
-            
-            # Ajuste de segurança para não amortizar mais do que o saldo devedor existente
-            amortizacao_do_mes = np.minimum(amortizacao_do_mes, saldo_devedor[:, t-1])
-            
-            # 4. Total do Serviço da Dívida e Atualização do Saldo Devedor Final do Mês
-            debt_service[:, t] = juros_do_mes + amortizacao_do_mes
-            saldo_devedor[:, t] = saldo_devedor[:, t-1] - amortizacao_do_mes
-            
-        return debt_service
+            # 2. Atualiza o saldo devedor pela inflação/indexador antes do cálculo da parcela (Atualização Monetária)
+            if self.contrato.indexador in [TipoIndexador.IPCA, TipoIndexador.IGPM, TipoIndexador.DOLAR]:
+                saldo_devedor = saldo_devedor * (1 + taxa_indexador_mes)
+                # Nesse caso, a taxa de juros do mês incide apenas sobre o saldo já corrigido
+                juros_do_mes = saldo_devedor * self.taxa_mensal_contratual
+            else:
+                # Para Selic ou Pré, os juros correm sobre a taxa cheia acumulada
+                juros_do_mes = saldo_devedor * taxa_total_mes
 
-    def project_all_portfolio(self, macro_scenarios: dict) -> np.ndarray:
-        """Soma o fluxo de caixa de todas as dívidas do passivo"""
-        n_simulations, n_months = macro_scenarios["selic"].shape
-        total_portfolio_service = np.zeros((n_simulations, n_months))
-        
-        for debt in self.portfolio.dividas:
-            total_portfolio_service += self.project_contract_cash_flow(debt, macro_scenarios)
+            # 3. Tratamento do Período de Carência
+            if mes <= carencia:
+                amortizacao_do_mes = 0.0
+                parcela_do_mes = juros_do_mes
+                saldo_devedor_fim = saldo_devedor
+            else:
+                # Prazo restante efetivo para amortizar a dívida
+                prazo_restante = prazo - max(carencia, mes - 1)
+                
+                # 4. Motores de Amortização de Mercado
+                if self.contrato.tipo_amortizacao == TipoAmortizacao.SAC:
+                    amortizacao_do_mes = saldo_devedor / prazo_restante
+                    parcela_do_mes = amortizacao_do_mes + juros_do_mes
+                    saldo_devedor_fim = saldo_devedor - amortizacao_do_mes
+                    
+                elif self.contrato.tipo_amortizacao == TipoAmortizacao.PRICE:
+                    # Fórmula francesa adaptada dinamicamente para o saldo atualizado e taxa corrente
+                    if taxa_total_mes > 0:
+                        fator = ((1 + taxa_total_mes) ** prazo_restante) - 1
+                        parcela_do_mes = saldo_devedor * (taxa_total_mes * ((1 + taxa_total_mes) ** prazo_restante)) / fator
+                    else:
+                        parcela_do_mes = saldo_devedor / prazo_restante
+                        
+                    amortizacao_do_mes = parcela_do_mes - juros_do_mes
+                    saldo_devedor_fim = saldo_devedor - amortizacao_do_mes
+                    
+                elif self.contrato.tipo_amortizacao == TipoAmortizacao.BULLET:
+                    # No modelo Bullet, amortiza tudo no último mês do contrato
+                    if mes == prazo:
+                        amortizacao_do_mes = saldo_devedor
+                        parcela_do_mes = amortizacao_do_mes + juros_do_mes
+                        saldo_devedor_fim = 0.0
+                    else:
+                        amortizacao_do_mes = 0.0
+                        parcela_do_mes = juros_do_mes
+                        saldo_devedor_fim = saldo_devedor
+
+            # Garante consistência matemática contra saldos residuais negativos por arredondamento
+            if saldo_devedor_fim < 0 or np.isclose(saldo_devedor_fim, 0):
+                saldo_devedor_fim = 0.0
+
+            # Aloca métricas calculadas nas listas da esteira
+            fluxo_parcelas.append(parcela_do_mes)
+            fluxo_juros.append(juros_do_mes)
+            fluxo_amortizacoes.append(amortizacao_do_mes)
+            fluxo_saldo_devedor.append(saldo_devedor_fim)
             
-        return total_portfolio_service
+            # Avança o saldo devedor para a abertura do próximo mês
+            saldo_devedor = saldo_devedor_fim
+
+        # Consolida tudo num DataFrame indexado pelo mês de pagamento
+        df_cronograma = pd.DataFrame({
+            "MES": list(range(1, prazo + 1)),
+            "PARCELA": fluxo_parcelas,
+            "JUROS": fluxo_juros,
+            "AMORTIZACAO": fluxo_amortizacoes,
+            "SALDO_DEVEDOR_FIM": fluxo_saldo_devedor
+        }).set_index("MES")
+        
+        return df_cronograma
