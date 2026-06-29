@@ -22,3 +22,8 @@ pydantic>=2.5.0,<3.0.0    # Validação estrita dos inputs operacionais e de pas
 # 5. Infraestrutura de API e Servidor (Fase de Entrega)
 fastapi>=0.100.0          # Framework assíncrono para disponibilização dos endpoints
 uvicorn>=0.22.0           # Servidor ASGI de alta performance para rodar a API
+
+
+matplotlib>=3.8.0
+ipykernel>=6.27.0
+seaborn>=0.12.2
