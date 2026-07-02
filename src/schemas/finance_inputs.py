@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from src.finance.metrics import DebtContractInput # Importa o que já criamos para o passivo
+from src.finance import DebtContractInput
 
 class OperationalInputs(BaseModel):
     receita_anual_base: float = Field(..., gt=0, description="Receita bruta dos últimos 12 meses (LTM)")
