@@ -1,86 +1,189 @@
 import numpy as np
 import pandas as pd
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from pydantic import BaseModel, Field
+from typing import List, Dict, Tuple, Optional
 
-class MacroSimulator:
-    def __init__(self, n_simulations: int, n_months: int, dt: float = 1/12):
-        """
-        Gerador de Cenários Macroeconômicos Estocásticos Correlacionados.
-        dt = 1/12 representa passos mensais.
-        """
-        self.n_simulations = n_simulations
-        self.n_months = n_months
-        self.dt = dt
-        
-        # Parâmetros Calibrados (Exemplo com médias históricas do mercado brasileiro)
-        # Selic (Vasicek)
-        self.kappa_r = 0.3   # Velocidade de reversão à média
-        self.theta_r = 0.10  # Meta de juros de longo prazo (10%)
-        self.sigma_r = 0.03  # Volatilidade dos juros
-        
-        # IPCA (Vasicek modificado)
-        self.kappa_i = 0.4   # Velocidade de reversão
-        self.theta_i = 0.045 # Meta de inflação de longo prazo (4.5%)
-        self.sigma_i = 0.02  # Volatilidade da inflação
-        
-        # Matriz de Correlação dos Choques (Selic vs IPCA)
-        # Historicamente, choques de inflação alta correlacionam com subida de juros
-        self.rho = 0.25 
-        
-    def _generate_correlated_shocks(self) -> tuple[np.ndarray, np.ndarray]:
-        """Gera choques brownianos correlacionados usando Cholesky"""
-        # Matriz de covariância simplificada para 2 variáveis
-        # [ 1    rho ]
-        # [ rho   1  ]
-        # A decomposição de Cholesky resulta em L onde L * L^T = Correl
-        # L = [ 1             0          ]
-        #     [ rho   sqrt(1 - rho^2)   ]
-        
-        Z1 = np.random.normal(0, 1, (self.n_simulations, self.n_months))
-        Z2 = np.random.normal(0, 1, (self.n_simulations, self.n_months))
-        
-        # Aplicando a correlação
-        W_r = Z1
-        W_i = self.rho * Z1 + np.sqrt(1 - self.rho**2) * Z2
-        
-        return W_r, W_i
 
-    def simulate(self, r0: float, i0: float) -> dict[str, np.ndarray]:
+class PredictorConfig(BaseModel):
+    """Configuração estrita de parâmetros para o motor econométrico."""
+    max_lags: int = Field(default=3, ge=1, description="Número máximo de defasagens (lags) testadas pelo AIC.")
+    horizonte_projeção_meses: int = Field(default=36, ge=1, description="Prazo da projeção futura do fluxo de caixa.")
+    significancia_banda: float = Field(default=0.05, description="Nível de significância alfa (0.05 = 95% de confiança).")
+
+
+class MacroPredictorEngine:
+    """
+    Motor econométrico baseado em Vetores Autorregressivos (VAR).
+    Responsável por projetar cenários macroeconômicos e validar a cobertura 
+    estatística dos intervalos de confiança para gestão de risco de capital.
+    """
+    def __init__(self, config: Optional[PredictorConfig] = None):
+        self.config = config or PredictorConfig()
+        self.model_fitted = None
+        self.var_names: List[str] = []
+        self.lags_otimos: int = 1
+
+    def selecionar_e_ajustar_modelo(self, df_universo: pd.DataFrame) -> List[str]:
         """
-        Roda a simulação de Monte Carlo para Selic e IPCA.
-        Retorna matrizes de shape (n_simulations, n_months + 1)
+        Executa a triagem de lags via AIC e ajusta o modelo VAR definitivo.
+        Garante a integridade dos tipos numéricos antes do ajuste.
         """
-        # Inicializa as matrizes de cenários (linhas = caminhos, colunas = meses)
-        selic = np.zeros((self.n_simulations, self.n_months + 1))
-        ipca = np.zeros((self.n_simulations, self.n_months + 1))
+        df_trabalho = df_universo[df_universo.index >= '1994-08-01'].copy()
         
-        # Condições iniciais (cenário atual do mercado)
-        selic[:, 0] = r0
-        ipca[:, 0] = i0
+        for col in df_trabalho.columns:
+            df_trabalho[col] = pd.to_numeric(df_trabalho[col], errors='coerce')
+            
+        df_trabalho = df_trabalho.dropna(how='all', axis=1).dropna()
+        df_trabalho.columns = [str(col).strip().replace('\r', '').replace('\n', '') for col in df_trabalho.columns]
         
-        # Gera os choques para todo o período
-        W_r, W_i = self._generate_correlated_shocks()
+        self.var_names = list(df_trabalho.columns)
         
-        # Evolução temporal via Euler-Maruyama
-        for t in range(1, self.n_months + 1):
-            r_old = selic[:, t-1]
-            i_old = ipca[:, t-1]
+        if len(self.var_names) == 0:
+            raise ValueError("Erro Crítico: Todas as colunas do DataFrame foram descartadas por não serem numéricas.")
+        
+        model = VAR(df_trabalho)
+        
+        selecao_lag = model.select_order(maxlags=self.config.max_lags)
+        self.lags_otimos = selecao_lag.selected_orders['aic']
+        if self.lags_otimos == 0: 
+            self.lags_otimos = 1 
+        
+        self.model_fitted = model.fit(maxlags=self.lags_otimos)
+        return self.var_names
+    
+    def gerar_projeções_estresse(self, df_historico: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """Gera cenário base e as bandas analíticas usando a covariância dos resíduos."""
+        if self.model_fitted is None:
+            raise ValueError("O modelo precisa ser ajustado antes de projetar.")
             
-            # Equação da Selic (Vasicek)
-            dr = self.kappa_r * (self.theta_r - r_old) * self.dt + self.sigma_r * np.sqrt(self.dt) * W_r[:, t-1]
-            selic[:, t] = np.clip(r_old + dr, 0.02, 0.25) # Clip para evitar juros absurdos (min 2%, max 25%)
+        # Garante o mesmo tratamento de limpeza e colunas string que o fit aplicou
+        df_trabalho = df_historico.copy()
+        for col in df_trabalho.columns:
+            df_trabalho[col] = pd.to_numeric(df_trabalho[col], errors='coerce')
+        df_trabalho = df_trabalho.dropna(how='all', axis=1).dropna()
+        df_trabalho.columns = [str(col).strip().replace('\r', '').replace('\n', '') for col in df_trabalho.columns]
+        
+        valores_iniciais = df_trabalho.values[-self.lags_otimos:]
+        
+        projeção_bruta = self.model_fitted.forecast(y=valores_iniciais, steps=self.config.horizonte_projeção_meses)
+        
+        erros_projeção = self.model_fitted.forecast_interval(
+            y=valores_iniciais, 
+            steps=self.config.horizonte_projeção_meses, 
+            alpha=self.config.significancia_banda
+        )
+        projeção_inferior, _, projeção_superior = erros_projeção
+        
+        index_futuro = pd.date_range(
+            start=df_trabalho.index[-1] + pd.DateOffset(months=1), 
+            periods=self.config.horizonte_projeção_meses, 
+            freq='MS'
+        )
+        
+        cenarios_por_variavel = {}
+        for i, nome_var in enumerate(self.var_names):
+            df_var_cenarios = pd.DataFrame(index=index_futuro)
+            df_var_cenarios["CENARIO_BASE"] = projeção_bruta[:, i]
+            df_var_cenarios["CENARIO_ESTRESSE_SUPERIOR"] = projeção_superior[:, i]
+            df_var_cenarios["CENARIO_ESTRESSE_INFERIOR"] = projeção_inferior[:, i]
             
-            # Equação do IPCA
-            di = self.kappa_i * (self.theta_i - i_old) * self.dt + self.sigma_i * np.sqrt(self.dt) * W_i[:, t-1]
-            ipca[:, t] = np.clip(i_old + di, -0.02, 0.15) # Evita deflação extrema ou hiperinflação fora do modelo
+            df_var_cenarios = df_var_cenarios.clip(lower=-0.02)
+            cenarios_por_variavel[nome_var] = df_var_cenarios
             
+        return cenarios_por_variavel
+
+    def rodar_teste_ruido_branco(self) -> dict:
+        """Valida se os resíduos do VAR são ruído branco (Portmanteau Test)."""
+        if self.model_fitted is None:
+            raise ValueError("O modelo precisa ser ajustado primeiro.")
+        
+        # O statsmodels não aceita o parâmetro 'significance' aqui
+        teste = self.model_fitted.test_whiteness(nlags=10)
+        
         return {
-            "selic": selic,
-            "ipca": ipca
+            "estatistica": teste.test_statistic,
+            "p_valor": teste.pvalue,
+            # Fazemos a checagem lógica usando o config diretamente no retorno
+            "passou": teste.pvalue > self.config.significancia_banda
         }
 
-if __name__ == "__main__":
-    # Teste rápido de sanidade do motor macro
-    sim = MacroSimulator(n_simulations=5, n_months=36)
-    cenarios = sim.simulate(r0=0.105, i0=0.04) # Começando com Selic a 10.5% e IPCA a 4.0%
-    print("Shape da matriz gerada (Cenários, Meses):", cenarios["selic"].shape)
-    print("Exemplo de 1 trajetória da Selic nos primeiros 6 meses:\n", cenarios["selic"][0, :6])
+    def gerar_projeções_benchmark_sarima(self, df_historico: pd.DataFrame, coluna_alvo: str) -> pd.DataFrame:
+        """
+        Gera uma projeção univariada de benchmark (SARIMA) com bandas de confiança analíticas
+        para servir de termo comparativo contra a estrutura multivariada do VAR.
+        """
+        # Limpeza rápida local
+        serie = pd.to_numeric(df_historico[coluna_alvo], errors='coerce').dropna()
+        serie = serie[serie.index >= '1994-08-01']
+        
+        # Ajusta um modelo SARIMA básico (1,1,1) x (1,0,0,12) para capturar inércia e sazonalidade anual
+        modelo_sarima = SARIMAX(serie, order=(1, 1, 1), seasonal_order=(1, 0, 0, 12), enforce_stationarity=False)
+        resultado_sarima = modelo_sarima.fit(disp=False)
+        
+        # Realiza o forecast
+        projeção = resultado_sarima.get_forecast(steps=self.config.horizonte_projeção_meses)
+        df_sarima = pd.DataFrame(index=projeção.predicted_mean.index)
+        
+        df_sarima["SARIMA_BASE"] = projeção.predicted_mean
+        
+        # Coleta os limites do intervalo de confiança conforme a significância configurada
+        intervalo = projeção.conf_int(alpha=self.config.significancia_banda)
+        df_sarima["SARIMA_ESTRESSE_SUPERIOR"] = intervalo.iloc[:, 1]
+        df_sarima["SARIMA_ESTRESSE_INFERIOR"] = intervalo.iloc[:, 0]
+        
+        return df_sarima.clip(lower=-0.02)
+
+    def executar_backtesting_cobertura(self, df_universo: pd.DataFrame, coluna_alvo: str, meses_teste: int = 36) -> dict:
+        """
+        Executa um teste de cobertura macro (Backtesting de Cauda) via Walk-Forward Validation.
+        Mede a eficácia real das bandas em conter os eventos históricos fora da amostra (out-of-sample).
+        """
+        df_trabalho = df_universo.copy()
+        for col in df_trabalho.columns:
+            df_trabalho[col] = pd.to_numeric(df_trabalho[col], errors='coerce')
+        df_trabalho = df_trabalho.dropna(how='all', axis=1).dropna()
+        df_trabalho.columns = [str(col).strip().replace('\r', '').replace('\n', '') for col in df_trabalho.columns]
+        
+        coluna_limpa = str(coluna_alvo).strip().replace('\r', '').replace('\n', '')
+        idx_alvo = list(df_trabalho.columns).index(coluna_limpa)
+        
+        total_pontos = 0
+        violacoes_superior = 0
+        violacoes_inferior = 0
+        
+        # Validação móvel passo a passo
+        for i in range(meses_teste - 3):
+            df_treino_movel = df_trabalho.iloc[:-(meses_teste - i)].copy()
+            if len(df_treino_movel) < 50:
+                continue
+                
+            model_temp = VAR(df_treino_movel)
+            res_temp = model_temp.fit(maxlags=self.lags_otimos)
+            
+            # Previsão de 3 passos à frente
+            stderr_temp = res_temp.forecast_interval(df_treino_movel.values[-self.lags_otimos:], steps=3, alpha=self.config.significancia_banda)
+            
+            lim_inf = stderr_temp[1][:, idx_alvo]
+            lim_sup = stderr_temp[2][:, idx_alvo]
+            
+            reais = df_trabalho.iloc[len(df_treino_movel):len(df_treino_movel)+3][coluna_limpa].values
+            
+            for r, inf, sup in zip(reais, lim_inf, lim_sup):
+                total_pontos += 1
+                if r > sup:
+                    violacoes_superior += 1
+                elif r < inf:
+                    violacoes_inferior += 1
+                    
+        taxa_violacao = (violacoes_superior + violacoes_inferior) / total_pontos if total_pontos > 0 else 0
+        
+        return {
+            "total_pontos": total_pontos,
+            "violacoes_teto": violacoes_superior,
+            "violacoes_piso": violacoes_inferior,
+            "taxa_violacao_real": taxa_violacao,
+            "taxa_alvo_esperada": self.config.significancia_banda,
+            "aprovado": taxa_violacao <= (self.config.significancia_banda * 1.5) # tolerância aceitável de mercado
+        }
