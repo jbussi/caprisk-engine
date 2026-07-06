@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from src.finance import DebtContractInput
+from src.finance import ContratoDividaInput
 
 class OperationalInputs(BaseModel):
     receita_anual_base: float = Field(..., gt=0, description="Receita bruta dos últimos 12 meses (LTM)")
@@ -28,4 +28,4 @@ class CompanySimulationRequest(BaseModel):
     operacional: OperationalInputs
     equity_atual: float = Field(..., ge=0, description="Capital próprio atual na mesa")
     ke_proposto: float = Field(..., gt=0, description="Retorno requerido pelo acionista (Custo de Equity)")
-    dividas_propostas: List[DebtContractInput]
+    dividas_propostas: List[ContratoDividaInput] = Field(..., description="Lista de dívidas propostas para a simulação")
