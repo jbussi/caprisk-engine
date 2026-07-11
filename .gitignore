@@ -39,20 +39,7 @@ __pycache__/
 # Se quiser versionar os notebooks mas não os outputs pesados, descomente a linha abaixo:
 # *.ipynb
 
-# --- Arquivos de Dados (Prevenção de estouro de quota/vazamento) ---
-data/raw/
-data/processed/
-data/external/
-*.csv
-*.xlsx
-*.parquet
-*.pickle
-*.pkl
-*.h5
-*.jsonl
-*.db
-*.sqlite
-*.sqlite3
+
 
 # --- IDEs e Editores de Código ---
 .vscode/
