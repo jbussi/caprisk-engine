@@ -3,8 +3,7 @@
 Módulo de Avaliação de Desempenho e Risco Estocástico (ALM Engine).
 
 Este módulo implementa a esteira de processamento quantitativo para cálculo de indicadores 
-financeiros clássicos e avançados (WACC, ROE, ROI, IL) sob múltiplas réguas de desconto 
-(Perspectivas de Criação de Valor e Poder de Compra) e métricas de performance ajustadas ao risco.
+financeiros clássicos e avançados (WACC, ROE, ROI, IL) sob múltiplas réguas de desconto.
 """
 
 import numpy as np
@@ -81,7 +80,6 @@ class CAPMStrategy(BaseDiscountStrategy):
         selic_anual = trajetoria_macro[:, index_map['selic']] / 100
         log_acumulado = 0.0
         for t in range(horizonte):
-            # Ke = Selic + Beta * Prêmio de Risco
             ke_anual = selic_anual[t] + (self.beta * self.premio)
             r_m = (1 + ke_anual) ** (1/12) - 1
             log_acumulado += np.log(1 + r_m)
@@ -104,7 +102,6 @@ class InflationDiscountStrategy(BaseDiscountStrategy):
             elif self.tipo == "igpm":
                 inf_mensal = trajetoria_macro[t, index_map['igpm']] / 100
             else:
-                # Índice customizado ponderado pela LhamaBanana/Empresa
                 inf_mensal = (trajetoria_macro[t, index_map['ipca']] / 100 * self.weights.get('ipca', 0.5)) + \
                              (trajetoria_macro[t, index_map['igpm']] / 100 * self.weights.get('igpm', 0.5))
             
@@ -126,7 +123,6 @@ class RiskMeasureEvaluator:
 
     @staticmethod
     def calcular_downside_risk(dados: np.ndarray, benchmark: float = 0.0) -> float:
-        """Calcula o semi-desvio padrão focando apenas nos retornos abaixo da meta."""
         sub_benchmark = dados[dados < benchmark]
         if len(sub_benchmark) == 0:
             return 0.0
@@ -134,7 +130,6 @@ class RiskMeasureEvaluator:
 
     @staticmethod
     def calcular_value_at_risk(dados: np.ndarray, confianca: float = 0.95) -> float:
-        """Retorna a perda máxima na cauda esquerda (percentil correspondente)."""
         percentil = (1.0 - confianca) * 100
         return float(np.percentile(dados, percentil))
 
@@ -149,9 +144,11 @@ class PerformanceEvaluatorEngine:
     Responsável por rodar o balanço, reavancar betas e consolidar os outputs estruturados.
     """
     
-    def __init__(self, config: EmpresaConfigDTO, colunas_macro: List[str]):
+    def __init__(self, config: EmpresaConfigDTO, colunas_macro: List[str] = None):
         self.config = config
-        self.colunas = [c.lower() for c in colunas_macro]
+        # Fallback inteligente para garantir compatibilidade com as chamadas do app.py
+        colunas = colunas_macro if colunas_macro else ["ipca", "igpm", "selic"]
+        self.colunas = [c.lower() for c in colunas]
         self._mapear_indices_colunas()
         self.beta_reavancado = self._reavancar_beta_firma()
 
@@ -163,9 +160,9 @@ class PerformanceEvaluatorEngine:
         }
 
     def _reavancar_beta_firma(self) -> float:
-        """Aplica a metodologia corporativa de reavancagem de risco do Beta."""
+        """Aplica a metodologia de Hamada para reavancagem de risco do Beta."""
         if self.config.pl_inicial <= 0:
-            return self.config.beta_desalavancado_setor * 5.0  # Penalização limite por insolvência inicial
+            return self.config.beta_desalavancado_setor * 5.0
         razao_alavancagem = self.config.passivo_inicial / self.config.pl_inicial
         eficiencia_fiscal = 1.0 - self.config.aliquota_imposto
         return self.config.beta_desalavancado_setor * (1.0 + eficiencia_fiscal * razao_alavancagem)
@@ -175,7 +172,6 @@ class PerformanceEvaluatorEngine:
         kd_bruto = selic_atual + spread_captacao
         kd_liquido = kd_bruto * (1.0 - self.config.aliquota_imposto)
         
-        # Ke adaptado simplificado para o ponto temporal
         ke_periodo = selic_atual + (self.beta_reavancado * 0.05)
         
         peso_passivo = self.config.passivo_inicial / self.config.ativo_inicial
@@ -193,7 +189,6 @@ class PerformanceEvaluatorEngine:
         """
         n_simulacoes, horizonte, _ = trajetorias_macro.shape
         
-        # Inicialização dos vetores estocásticos de saída
         vpl_selic = np.zeros(n_simulacoes)
         vpl_acionista = np.zeros(n_simulacoes)
         vpl_wacc = np.zeros(n_simulacoes)
@@ -205,7 +200,6 @@ class PerformanceEvaluatorEngine:
         il_vec = np.zeros(n_simulacoes)
         wacc_medios = np.zeros(n_simulacoes)
 
-        # Instanciação das estratégias de desconto de valor e inflação
         strat_selic = FinanceiraSelicStrategy()
         strat_capm = CAPMStrategy(beta_leverage=self.beta_reavancado)
         strat_ipca = InflationDiscountStrategy("ipca")
@@ -214,24 +208,26 @@ class PerformanceEvaluatorEngine:
 
         for s in range(n_simulacoes):
             matriz_macro_cenario = trajetorias_macro[s, :, :]
-            fluxo_op_ativo = caixas_brutos_ativo[s, :]
+            
+            fluxo_op_ativo = caixas_brutos_ativo[s, :].copy()
+            fluxo_op_ativo[-1] += self.config.ativo_inicial
+            
             fluxo_liq_pl = fluxo_op_ativo - fluxo_servico_divida[s, :]
 
-            # 1. Cálculo do WACC médio do cenário corrente
+            # 1. Cálculo do WACC do mês
             wacc_do_mes = np.array([self.calcular_wacc_periodo(matriz_macro_cenario[t, self.idx_map['selic']]/100, spread_balanco) for t in range(horizonte)])
             wacc_medios[s] = np.mean(wacc_do_mes)
 
-            # 2. Geração dos fatores de desconto (Polimorfismo em Ação)
+            # 2. Fatores de desconto sobre a matriz bidi do cenário core
             f_selic = strat_selic.calcular_fatores(horizonte, matriz_macro_cenario, self.idx_map)
             f_capm = strat_capm.calcular_fatores(horizonte, matriz_macro_cenario, self.idx_map)
             f_ipca = strat_ipca.calcular_fatores(horizonte, matriz_macro_cenario, self.idx_map)
             f_igpm = strat_igpm.calcular_fatores(horizonte, matriz_macro_cenario, self.idx_map)
             f_custom = strat_custom.calcular_fatores(horizonte, matriz_macro_cenario, self.idx_map)
 
-            # Fatores para o WACC acumulado do cenário
             f_wacc = np.exp(-np.cumsum(np.log(1 + wacc_do_mes)))
-
-            # 3. Integração de Valores Presentes Líquidos (VPL)
+            
+            # 3. Integração de Valores Presentes Líquidos (VPL) - Valores Absolutos
             vpl_selic[s] = np.sum(fluxo_liq_pl * f_selic) - self.config.pl_inicial
             vpl_acionista[s] = np.sum(fluxo_liq_pl * f_capm) - self.config.pl_inicial
             vpl_wacc[s] = np.sum(fluxo_op_ativo * f_wacc) - self.config.ativo_inicial
@@ -240,9 +236,14 @@ class PerformanceEvaluatorEngine:
             vpl_real_igpm[s] = np.sum(fluxo_liq_pl * f_igpm) - self.config.pl_inicial
             vpl_real_custom[s] = np.sum(fluxo_liq_pl * f_custom) - self.config.pl_inicial
 
-            # 4. Indicadores Clássicos de Retorno e Lucratividade
-            roe_vec[s] = np.sum(fluxo_liq_pl * f_capm) / self.config.pl_inicial
-            roi_vec[s] = np.sum(fluxo_op_ativo * f_wacc) / self.config.ativo_inicial
+            # 4. Indicadores Percentuais Líquidos Correção (Subtraindo o capital inicial / 1.0)
+            # ROE Líquido = (Valor Presente dos Fluxos do Acionista - PL Inicial) / PL Inicial
+            roe_vec[s] = vpl_acionista[s] / self.config.pl_inicial
+            
+            # ROI Líquido = (Valor Presente dos Fluxos Operacionais - Ativo Inicial) / Ativo Inicial
+            roi_vec[s] = vpl_wacc[s] / self.config.ativo_inicial
+            
+            # Índice de Lucratividade (IL) tradicional = VP dos Fluxos / Investimento Inicial
             il_vec[s] = np.sum(fluxo_liq_pl * f_capm) / self.config.pl_inicial
 
         return ResultadoCenárioDTO(
@@ -252,14 +253,10 @@ class PerformanceEvaluatorEngine:
         )
 
     def gerar_relatorio_executivo(self, res: ResultadoCenárioDTO, medida_risco: str = "volatilidade") -> Dict:
-        """
-        Calcula o Índice de Sharpe consolidado do balanço corporativo cruzando as perspectivas 
-        de risco selecionadas (Volatilidade, Downside ou VaR de Cauda).
-        """
-        selic_medio_rf = 0.105  # Benchmark de corte nominal (ex: 10.5% a.a.)
+        """Consolida as métricas financeiras finais ajustadas ao risco para exibição."""
+        selic_medio_rf = 0.105
         roe_medio = float(np.mean(res.roe))
         
-        # Seleção da métrica de risco via desacoplamento da classe estática
         if medida_risco.lower() == "volatilidade":
             risco = RiskMeasureEvaluator.calcular_volatilidade(res.roe)
         elif medida_risco.lower() == "downside":
